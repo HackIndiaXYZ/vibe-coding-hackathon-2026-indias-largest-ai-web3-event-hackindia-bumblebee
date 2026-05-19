@@ -1,0 +1,44 @@
+/* ============================================================
+   Day One — Design Tokens
+   ------------------------------------------------------------
+   THIS IS THE ONLY FILE YOU NEED TO EDIT TO RE-SKIN THE UI.
+   Every color, font, radius, and spacing value is declared here
+   as a Tailwind v4 @theme variable. Components consume these via
+   utility classes (e.g. bg-surface, text-fg, font-sans).
+   ============================================================ */
+
+@theme {
+  /* ---------- color palette ---------- */
+  --color-bg: #0b0c0f;            /* app background */
+  --color-surface: #15171c;       /* cards, channels, panels */
+  --color-surface-2: #1c1f26;     /* nested surface (e.g. AI panel) */
+  --color-border: #2a2d36;        /* subtle dividers */
+  --color-fg: #f4f4f5;            /* primary text */
+  --color-muted: #9ca3af;         /* secondary text */
+  --color-faint: #6b7280;         /* timestamps, labels */
+
+  --color-accent: #60a5fa;        /* primary actions, links */
+  --color-accent-hover: #93c5fd;
+  --color-warning: #f59e0b;       /* timer warnings, twist accent */
+  --color-success: #10b981;       /* finished states, high scores */
+  --color-danger: #ef4444;        /* low scores, errors */
+
+  --color-pm: #a78bfa;            /* channel accents */
+  --color-reviewer: #f472b6;
+  --color-teammate: #34d399;
+
+  /* ---------- typography ---------- */
+  --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+
+  /* ---------- radii ---------- */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+
+  /* ---------- layout rails (work-surface columns) ---------- */
+  --layout-channel-rail: 16rem;   /* left channel column width */
+  --layout-assistant-rail: 22rem; /* right AI assistant column width */
+  --layout-topbar: 3.5rem;        /* top bar height */
+}

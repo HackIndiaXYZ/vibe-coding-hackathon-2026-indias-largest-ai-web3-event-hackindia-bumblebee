@@ -1,0 +1,10 @@
+[project]
+name = "dayone-backend"
+version = "0.1.0"
+description = "Day One backend — AI work-simulation orchestrator"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
