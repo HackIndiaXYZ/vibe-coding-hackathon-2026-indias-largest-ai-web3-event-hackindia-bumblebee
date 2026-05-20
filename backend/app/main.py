@@ -8,12 +8,13 @@ Phase 3 will add the WebSocket endpoint; Phase 5 adds /scorecard.
 """
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Awaitable, Callable
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session as DbSession
 
@@ -23,10 +24,11 @@ from app.agents.scenario_engine import (
     generate_scenario,
 )
 from app.config import settings
-from app.db import get_session, init_db
+from app.db import engine, get_session, init_db
 from app.models import Actor, Session as SessionModel, SessionStatus
+from app.orchestrator import CHANNELS, SessionOrchestrator, history_for_channel
 from app.schemas import CreateSessionRequest, SessionResponse
-from app.telemetry import log_event
+from app.telemetry import get_events, log_event
 
 # Callable signature: (role: str) -> awaitable Scenario.
 ScenarioGenerator = Callable[[str], Awaitable[Scenario]]
@@ -192,3 +194,129 @@ async def end_session(
     db.refresh(session)
     log_event(db, session=session, actor=Actor.SYSTEM, type="session_end")
     return _to_response(session)
+
+
+# ---------- websocket: per-session orchestrator ----------
+
+# Small delay between an agent's regular reply and a twist follow-up, so the
+# twist feels like a separate Slack ping rather than glued to the reply.
+TWIST_FOLLOW_UP_DELAY_S = 1.2
+
+
+@app.websocket("/sessions/{session_id}/ws")
+async def session_ws(websocket: WebSocket, session_id: str) -> None:
+    """Per-session orchestrator socket.
+
+    Protocol (JSON frames):
+
+        Client → Server:
+            {"type": "candidate_message", "channel": "pm"|"reviewer"|"teammate", "content": "..."}
+
+        Server → Client:
+            {"type": "ready", "history": {channel: [<message>, ...]}}
+            {"type": "typing", "channel": str, "is_typing": bool}
+            {"type": "agent_message", "channel": str, "actor_name": str, "content": str, "ts_ms": int}
+            {"type": "requirement_change", "channel": "pm", "actor_name": str, "content": str, "summary": str, "ts_ms": int}
+            {"type": "error", "message": str}
+    """
+    await websocket.accept()
+
+    # Initial handshake: load session, build orchestrator, send history.
+    with DbSession(engine) as db:
+        session = db.get(SessionModel, session_id)
+        if session is None:
+            await websocket.send_json({"type": "error", "message": "Session not found"})
+            await websocket.close()
+            return
+        if not session.scenario_json:
+            await websocket.send_json(
+                {"type": "error", "message": "Session has no scenario; cannot start chat"}
+            )
+            await websocket.close()
+            return
+        scenario = Scenario.model_validate(session.scenario_json)
+        orchestrator = SessionOrchestrator.from_event_log(
+            db=db, session=session, scenario=scenario
+        )
+        history = {ch: history_for_channel(get_events(db, session.id), ch) for ch in CHANNELS}
+
+    await websocket.send_json({"type": "ready", "history": history})
+
+    try:
+        while True:
+            msg = await websocket.receive_json()
+            mtype = msg.get("type")
+
+            if mtype != "candidate_message":
+                await websocket.send_json(
+                    {"type": "error", "message": f"Unknown message type: {mtype!r}"}
+                )
+                continue
+
+            channel = msg.get("channel")
+            content = (msg.get("content") or "").strip()
+            if channel not in CHANNELS:
+                await websocket.send_json(
+                    {"type": "error", "message": f"Unknown channel: {channel!r}"}
+                )
+                continue
+            if not content:
+                await websocket.send_json(
+                    {"type": "error", "message": "Empty message ignored"}
+                )
+                continue
+
+            # Typing indicator — sent immediately so the candidate sees life.
+            await websocket.send_json(
+                {"type": "typing", "channel": channel, "is_typing": True}
+            )
+
+            # Run the orchestrator turn against a short-lived DB session.
+            try:
+                with DbSession(engine) as db:
+                    session = db.get(SessionModel, session_id)
+                    if session is None:
+                        await websocket.send_json(
+                            {"type": "error", "message": "Session disappeared"}
+                        )
+                        break
+                    outcome = await orchestrator.handle_candidate_message(
+                        db=db, session=session, channel=channel, content=content
+                    )
+            except Exception as exc:  # noqa: BLE001
+                await websocket.send_json(
+                    {"type": "typing", "channel": channel, "is_typing": False}
+                )
+                await websocket.send_json(
+                    {"type": "error", "message": f"Reply failed: {exc}"}
+                )
+                continue
+
+            await websocket.send_json(
+                {"type": "typing", "channel": channel, "is_typing": False}
+            )
+            await websocket.send_json(
+                {
+                    "type": "agent_message",
+                    "channel": channel,
+                    "actor_name": outcome.actor_name,
+                    "content": outcome.reply,
+                    "ts_ms": outcome.reply_ts_ms,
+                }
+            )
+
+            if outcome.twist is not None:
+                # Small natural pause then a separate PM ping for the twist.
+                await asyncio.sleep(TWIST_FOLLOW_UP_DELAY_S)
+                await websocket.send_json(
+                    {
+                        "type": "requirement_change",
+                        "channel": "pm",
+                        "actor_name": outcome.twist["actor_name"],
+                        "content": outcome.twist["content"],
+                        "summary": outcome.twist["summary"],
+                        "ts_ms": outcome.twist["ts_ms"],
+                    }
+                )
+    except WebSocketDisconnect:
+        return

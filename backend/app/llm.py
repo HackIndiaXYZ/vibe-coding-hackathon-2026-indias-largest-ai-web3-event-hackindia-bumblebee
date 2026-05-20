@@ -12,6 +12,7 @@ schema and are translated to whichever provider format we're on.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, Literal
 
@@ -145,16 +146,46 @@ async def complete(
     if _wants_thinking_disabled(tier, model):
         config.thinking_config = types.ThinkingConfig(thinking_budget=0)
 
-    try:
-        response = await client.aio.models.generate_content(
-            model=model,
-            contents=contents,
-            config=config,
-        )
-    except Exception as exc:  # noqa: BLE001  surface as our own error type
-        raise LLMError(f"Gemini call failed: {exc}") from exc
-
+    response = await _generate_with_retry(
+        client=client, model=model, contents=contents, config=config
+    )
     return response.text or ""
+
+
+# ----- transient-error retry (Gemini sometimes returns 503 UNAVAILABLE) -----
+
+# Substrings that indicate a transient failure worth retrying. We do NOT
+# retry on 429 with "limit: 0" since that's a permanent quota issue.
+_TRANSIENT_PATTERNS = (
+    "503",
+    "UNAVAILABLE",
+    "high demand",
+    "DEADLINE_EXCEEDED",
+    "INTERNAL",
+)
+# 3 attempts total = initial + 2 retries; exponential-ish backoff in seconds.
+_RETRY_DELAYS_S: tuple[float, ...] = (0.0, 1.5, 3.0)
+
+
+async def _generate_with_retry(
+    *, client: genai.Client, model: str, contents: Any, config: Any
+):
+    """Wrap generate_content with retry on transient errors."""
+    last_exc: Exception | None = None
+    for delay in _RETRY_DELAYS_S:
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            return await client.aio.models.generate_content(
+                model=model, contents=contents, config=config
+            )
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            err_str = str(exc)
+            if not any(p in err_str for p in _TRANSIENT_PATTERNS):
+                raise LLMError(f"Gemini call failed: {exc}") from exc
+            # otherwise fall through to next retry
+    raise LLMError(f"Gemini call failed after retries: {last_exc}") from last_exc
 
 
 async def complete_json(
