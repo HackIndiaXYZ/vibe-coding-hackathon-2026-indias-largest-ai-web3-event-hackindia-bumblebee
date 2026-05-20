@@ -90,6 +90,19 @@ npm run dev
 
 Open <http://localhost:5173>.
 
+### Tests
+
+```bash
+cd backend
+.\.venv\Scripts\Activate.ps1
+pytest                       # runs everything, including live Gemini tests
+pytest -m "not live"         # offline only (skips live API; safe when quota is exhausted)
+```
+
+Live tests are tagged with `@pytest.mark.live` and consume Gemini free-tier
+quota (currently 20 requests/day per model). Use `-m "not live"` in CI or
+when you're out of quota.
+
 ---
 
 ## Repo layout

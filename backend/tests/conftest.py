@@ -20,6 +20,7 @@ os.environ["DATABASE_URL"] = f"sqlite:///{_TEST_DIR / 'test.db'}"
 import pytest  # noqa: E402
 from sqlmodel import SQLModel  # noqa: E402
 
+from app.agents.evaluators import AxisVerdict, EvidenceItem  # noqa: E402
 from app.agents.scenario_engine import (  # noqa: E402
     Cast,
     CastPersona,
@@ -28,7 +29,7 @@ from app.agents.scenario_engine import (  # noqa: E402
     Twist,
 )
 from app.db import engine  # noqa: E402
-from app.main import app, get_scenario_generator  # noqa: E402
+from app.main import app, get_scenario_generator, get_session_evaluator  # noqa: E402
 
 
 def _build_fake_scenario(role: str) -> Scenario:
@@ -82,6 +83,50 @@ def _override_scenario_generator():
 
 
 app.dependency_overrides[get_scenario_generator] = _override_scenario_generator
+
+
+async def _fake_evaluate_session(*, events, scenario):
+    """Deterministic 3-axis verdict citing the first real event_id.
+
+    Used everywhere POST /sessions/{id}/end is exercised in tests so the suite
+    never makes real strong-tier evaluator calls (3 per session is expensive
+    and flaky on free-tier quotas).
+    """
+    real_id = next((e.id for e in events if e.id is not None), 1)
+    real_ts = events[0].ts_ms if events else 0
+    sample = EvidenceItem(
+        event_id=real_id,
+        ts_ms=real_ts,
+        quote="(synthetic conftest evidence)",
+        reasoning="Cited the first event of the session as a placeholder.",
+    )
+    return [
+        AxisVerdict(
+            axis="Judgment & Prioritization",
+            score=4,
+            summary="They surfaced trade-offs explicitly.",
+            evidence=[sample],
+        ),
+        AxisVerdict(
+            axis="Communication & Collaboration",
+            score=3,
+            summary="Communication was adequate.",
+            evidence=[sample],
+        ),
+        AxisVerdict(
+            axis="Quality of AI Use",
+            score=4,
+            summary="Productive AI use; mostly maintained ownership.",
+            evidence=[sample],
+        ),
+    ]
+
+
+def _override_evaluator():
+    return _fake_evaluate_session
+
+
+app.dependency_overrides[get_session_evaluator] = _override_evaluator
 
 
 @pytest.fixture(autouse=True)

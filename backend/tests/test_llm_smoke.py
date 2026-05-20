@@ -16,6 +16,7 @@ def _has_real_key() -> bool:
     return bool(k) and not k.startswith("PASTE") and k != "your_gemini_api_key_here"
 
 
+@pytest.mark.live
 @pytest.mark.skipif(not _has_real_key(), reason="GEMINI_API_KEY not configured")
 async def test_complete_returns_text_from_gemini() -> None:
     text = await complete(

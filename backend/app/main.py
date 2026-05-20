@@ -19,6 +19,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session as DbSession
 
 from app.agents.assistant import assistant_reply as _default_assistant_reply
+from app.agents.evaluators import (
+    AxisVerdict,
+    ScoringError,
+    evaluate_session as _default_evaluate_session,
+)
 from app.agents.scenario_engine import (
     Scenario,
     ScenarioGenerationError,
@@ -26,7 +31,7 @@ from app.agents.scenario_engine import (
 )
 from app.config import settings
 from app.db import engine, get_session, init_db
-from app.models import Actor, Session as SessionModel, SessionStatus
+from app.models import Actor, Event, Scorecard, Session as SessionModel, SessionStatus
 from app.orchestrator import CHANNELS, SessionOrchestrator, history_for_channel
 from app.schemas import (
     ArtifactSnapshotRequest,
@@ -35,11 +40,15 @@ from app.schemas import (
     AssistantQueryResponse,
     CreateSessionRequest,
     EventResponse,
+    ScorecardAxisResponse,
+    ScorecardEvidenceResponse,
+    ScorecardResponse,
     SessionResponse,
 )
 from app.telemetry import get_events, log_event
 
 AssistantReplyFn = Callable[..., Awaitable[str]]
+EvaluateSessionFn = Callable[..., Awaitable[list[AxisVerdict]]]
 
 # Callable signature: (role: str) -> awaitable Scenario.
 ScenarioGenerator = Callable[[str], Awaitable[Scenario]]
@@ -77,6 +86,15 @@ def get_assistant_reply() -> AssistantReplyFn:
     Test code overrides this with a fake to avoid LLM calls.
     """
     return _default_assistant_reply
+
+
+def get_session_evaluator() -> EvaluateSessionFn:
+    """Dependency providing the parallel session-evaluator function.
+
+    Test code overrides this with a deterministic fake so the scoring flow
+    can be exercised without 3 strong-tier LLM calls per test.
+    """
+    return _default_evaluate_session
 
 
 def _to_response(s: SessionModel) -> SessionResponse:
@@ -195,7 +213,14 @@ async def start_session(
 async def end_session(
     session_id: str,
     db: DbSession = Depends(get_session),
+    evaluate_fn: EvaluateSessionFn = Depends(get_session_evaluator),
 ) -> SessionResponse:
+    """End the session and run the three evaluators in parallel.
+
+    Flow: ACTIVE → WRAPPING (session_end logged) → SCORING (evaluators run) →
+    COMPLETE (Scorecard rows persisted). On evaluator failure, status rolls
+    back to WRAPPING so the frontend can retry with another POST /end.
+    """
     session = db.get(SessionModel, session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -204,15 +229,118 @@ async def end_session(
             status_code=409,
             detail=f"Cannot end session in status {session.status.value}",
         )
-    # WRAPPING marks "candidate is done; evaluators have not finished yet".
-    # Phase 5 transitions WRAPPING → SCORING → COMPLETE.
+
+    # Only stamp ended_at on the first /end call (idempotent retry-friendly).
+    if session.ended_at is None:
+        session.ended_at = datetime.now(timezone.utc)
     session.status = SessionStatus.WRAPPING
-    session.ended_at = datetime.now(timezone.utc)
     db.add(session)
     db.commit()
     db.refresh(session)
     log_event(db, session=session, actor=Actor.SYSTEM, type="session_end")
+
+    # Transition into scoring.
+    session.status = SessionStatus.SCORING
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+
+    try:
+        events = get_events(db, session.id)
+        if not session.scenario_json:
+            raise ScoringError("Session has no scenario; cannot score.")
+        scenario = Scenario.model_validate(session.scenario_json)
+        verdicts = await evaluate_fn(events=events, scenario=scenario)
+    except Exception as exc:  # noqa: BLE001
+        log_event(
+            db,
+            session=session,
+            actor=Actor.SYSTEM,
+            type="scoring_failed",
+            payload={"error": str(exc)},
+        )
+        # Roll back to WRAPPING so the frontend can retry POST /end.
+        session.status = SessionStatus.WRAPPING
+        db.add(session)
+        db.commit()
+        db.refresh(session)
+        raise HTTPException(status_code=502, detail=f"Scoring failed: {exc}") from exc
+
+    # Persist scorecard rows.
+    for v in verdicts:
+        db.add(
+            Scorecard(
+                session_id=session.id,
+                axis=v.axis,
+                score=v.score,
+                summary=v.summary,
+                evidence=[e.model_dump() for e in v.evidence],
+            )
+        )
+    log_event(
+        db,
+        session=session,
+        actor=Actor.SYSTEM,
+        type="scoring_complete",
+        payload={"axes": [v.axis for v in verdicts]},
+    )
+
+    session.status = SessionStatus.COMPLETE
+    db.add(session)
+    db.commit()
+    db.refresh(session)
     return _to_response(session)
+
+
+@app.get(
+    "/sessions/{session_id}/scorecard",
+    response_model=ScorecardResponse,
+)
+async def get_scorecard(
+    session_id: str,
+    db: DbSession = Depends(get_session),
+) -> ScorecardResponse:
+    """Return the evidence-cited scorecard for a session.
+
+    The disclaimer field reminds consumers that this is decision support for
+    a human reviewer — never an automated verdict.
+    """
+    session = db.get(SessionModel, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    from sqlmodel import select
+
+    rows = list(
+        db.exec(
+            select(Scorecard)
+            .where(Scorecard.session_id == session_id)
+            .order_by(Scorecard.axis)
+        )
+    )
+    if not rows:
+        raise HTTPException(
+            status_code=404,
+            detail="No scorecard yet — session may still be ACTIVE/WRAPPING.",
+        )
+    axes = [
+        ScorecardAxisResponse(
+            axis=r.axis,
+            score=r.score,
+            summary=r.summary,
+            evidence=[
+                ScorecardEvidenceResponse(
+                    event_id=e["event_id"],
+                    ts_ms=e["ts_ms"],
+                    quote=e["quote"],
+                    reasoning=e["reasoning"],
+                )
+                for e in (r.evidence or [])
+            ],
+            flagged="[FLAGGED" in (r.summary or ""),
+        )
+        for r in rows
+    ]
+    return ScorecardResponse(session_id=session_id, axes=axes)
 
 
 # ---------- work-surface telemetry + AI assistant ----------

@@ -152,11 +152,13 @@ def test_events_route_returns_coherent_ordered_timeline() -> None:
     types = [e["type"] for e in events]
 
     # Story sanity: session_created, scenario_loaded, session_start come first;
-    # then mixed candidate activity; ending with session_end.
+    # then mixed candidate activity; ending with scoring_complete (Phase 5
+    # wires scoring into /end, so session_end is followed by scoring_complete).
     assert types[0] == "session_created"
     assert "scenario_loaded" in types
     assert "session_start" in types
-    assert types[-1] == "session_end"
+    assert "session_end" in types
+    assert types[-1] == "scoring_complete"
 
     # ts_ms monotonically non-decreasing (events are ordered by ts_ms then id).
     ts_list = [e["ts_ms"] for e in events]

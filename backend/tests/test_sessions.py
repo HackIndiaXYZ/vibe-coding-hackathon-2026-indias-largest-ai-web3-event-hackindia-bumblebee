@@ -52,20 +52,21 @@ def test_full_session_lifecycle() -> None:
     assert body["status"] == SessionStatus.ACTIVE.value
     assert body["started_at"] is not None
 
-    # end
+    # end — Phase 5 wires scoring into /end, so we land in COMPLETE.
     r = client.post(f"/sessions/{sid}/end")
     assert r.status_code == 200
     body = r.json()
-    assert body["status"] == SessionStatus.WRAPPING.value
+    assert body["status"] == SessionStatus.COMPLETE.value
     assert body["ended_at"] is not None
 
-    # telemetry: should have created, scenario_loaded, start, end events
+    # telemetry: should have created, scenario_loaded, start, end, scoring_complete events
     events = _events_for(sid)
     types = [e.type for e in events]
     assert "session_created" in types
     assert "scenario_loaded" in types
     assert "session_start" in types
     assert "session_end" in types
+    assert "scoring_complete" in types
 
 
 def test_get_missing_session_returns_404() -> None:

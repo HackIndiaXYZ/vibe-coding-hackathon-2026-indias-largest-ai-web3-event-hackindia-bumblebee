@@ -55,3 +55,33 @@ class AssistantQueryResponse(BaseModel):
     response: str
     query_ts_ms: int
     response_ts_ms: int
+
+
+# ----- scorecard -----
+
+
+class ScorecardEvidenceResponse(BaseModel):
+    event_id: int
+    ts_ms: int
+    quote: str
+    reasoning: str
+
+
+class ScorecardAxisResponse(BaseModel):
+    axis: str
+    score: int
+    summary: str
+    evidence: list[ScorecardEvidenceResponse]
+    flagged: bool = False
+
+
+SCORECARD_DISCLAIMER = (
+    "Decision support for a human reviewer — not an automated verdict. "
+    "Each score cites timestamped moments from this session; review the evidence yourself."
+)
+
+
+class ScorecardResponse(BaseModel):
+    session_id: str
+    disclaimer: str = SCORECARD_DISCLAIMER
+    axes: list[ScorecardAxisResponse]
