@@ -1,23 +1,35 @@
-"""FastAPI entrypoint — health + session lifecycle REST routes.
+"""FastAPI entrypoint — health, session lifecycle, scenario-on-create.
 
-Phase 1 covers session CRUD and the foundation for telemetry. Phase 3 adds the
-WebSocket endpoint for the orchestrator; Phase 5 adds /scorecard.
+Phase 1: session CRUD + telemetry.
+Phase 2: POST /sessions also generates a fictional scenario (strong-tier
+         Gemini call) and stores it on the session before returning. Done
+         synchronously so the latency is hidden behind the Briefing screen.
+Phase 3 will add the WebSocket endpoint; Phase 5 adds /scorecard.
 """
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from typing import Awaitable, Callable
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session as DbSession
 
+from app.agents.scenario_engine import (
+    Scenario,
+    ScenarioGenerationError,
+    generate_scenario,
+)
 from app.config import settings
 from app.db import get_session, init_db
 from app.models import Actor, Session as SessionModel, SessionStatus
 from app.schemas import CreateSessionRequest, SessionResponse
 from app.telemetry import log_event
+
+# Callable signature: (role: str) -> awaitable Scenario.
+ScenarioGenerator = Callable[[str], Awaitable[Scenario]]
 
 
 @asynccontextmanager
@@ -35,6 +47,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def get_scenario_generator() -> ScenarioGenerator:
+    """Dependency providing the scenario generator.
+
+    Test code overrides this with a deterministic fake via
+    `app.dependency_overrides[get_scenario_generator] = ...`.
+    """
+    return generate_scenario
 
 
 def _to_response(s: SessionModel) -> SessionResponse:
@@ -62,7 +83,14 @@ async def health() -> dict[str, str]:
 async def create_session(
     req: CreateSessionRequest,
     db: DbSession = Depends(get_session),
+    gen: ScenarioGenerator = Depends(get_scenario_generator),
 ) -> SessionResponse:
+    """Create a session AND pre-generate the scenario.
+
+    Synchronous on purpose: the frontend shows a briefing-loading state while
+    this call is in flight, so the candidate never sees a "spinning UI in the
+    workspace" state.
+    """
     session = SessionModel(id=uuid4().hex, role=req.role)
     db.add(session)
     db.commit()
@@ -74,8 +102,38 @@ async def create_session(
         type="session_created",
         payload={"role": req.role},
     )
-    # Scenario generation will be wired in Phase 2 (synchronously here, since
-    # we want to hide its latency behind the briefing screen).
+
+    try:
+        scenario = await gen(req.role)
+    except ScenarioGenerationError as exc:
+        log_event(
+            db,
+            session=session,
+            actor=Actor.SYSTEM,
+            type="scenario_generation_failed",
+            payload={"error": str(exc)},
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Scenario generation failed: {exc}",
+        ) from exc
+
+    session.scenario_json = scenario.model_dump()
+    session.status = SessionStatus.BRIEFING
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+    log_event(
+        db,
+        session=session,
+        actor=Actor.SYSTEM,
+        type="scenario_loaded",
+        payload={
+            "company_name": scenario.company_name,
+            "task_count": len(scenario.tasks),
+            "twist_trigger_turn": scenario.twist.trigger_after_turn,
+        },
+    )
     return _to_response(session)
 
 

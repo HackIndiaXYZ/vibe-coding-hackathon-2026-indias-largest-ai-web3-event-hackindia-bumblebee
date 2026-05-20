@@ -19,7 +19,11 @@ class Settings(BaseSettings):
     # ----- Gemini -----
     gemini_api_key: str = ""
     gemini_fast_model: str = "gemini-2.5-flash"
-    gemini_strong_model: str = "gemini-2.5-pro"
+    # Default strong = flash too because free-tier projects typically have
+    # 0-quota on gemini-2.5-pro. Thinking is enabled for strong calls (see
+    # llm._wants_thinking_disabled), so this still produces solid structured
+    # output for the Scenario Engine + Evaluators.
+    gemini_strong_model: str = "gemini-2.5-flash"
 
     # ----- Backend -----
     database_url: str = "sqlite:///./dayone.db"

@@ -2,6 +2,9 @@
 
 Also asserts that telemetry events fire at each lifecycle transition, since
 the rest of the system depends on a reliable event log.
+
+The scenario generator dependency is overridden to a deterministic fake in
+`conftest.py`, so these tests run fully offline.
 """
 from __future__ import annotations
 
@@ -23,13 +26,17 @@ def _events_for(session_id: str) -> list[Event]:
 def test_full_session_lifecycle() -> None:
     client = TestClient(app)
 
-    # create
+    # create — also triggers (fake) scenario generation
     r = client.post("/sessions", json={"role": "Junior Full-Stack Developer"})
     assert r.status_code == 201, r.text
     body = r.json()
     sid = body["id"]
-    assert body["status"] == SessionStatus.CREATED.value
+    assert body["status"] == SessionStatus.BRIEFING.value
     assert body["role"] == "Junior Full-Stack Developer"
+    assert body["scenario"]["company_name"] == "TestCo"
+    assert body["scenario"]["role"] == "Junior Full-Stack Developer"
+    assert len(body["scenario"]["tasks"]) >= 3
+    assert body["scenario"]["twist"]["trigger_after_turn"] >= 2
     assert body["started_at"] is None
     assert body["ended_at"] is None
 
@@ -52,10 +59,11 @@ def test_full_session_lifecycle() -> None:
     assert body["status"] == SessionStatus.WRAPPING.value
     assert body["ended_at"] is not None
 
-    # telemetry: should have created, start, end events
+    # telemetry: should have created, scenario_loaded, start, end events
     events = _events_for(sid)
     types = [e.type for e in events]
     assert "session_created" in types
+    assert "scenario_loaded" in types
     assert "session_start" in types
     assert "session_end" in types
 

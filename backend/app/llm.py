@@ -1,8 +1,9 @@
 """Provider-agnostic LLM client.
 
-Exposes one async function:
+Exposes two async functions:
 
     await complete(messages, tier="fast" | "strong", ...) -> str
+    await complete_json(messages, tier=..., schema=PydanticModelOrDict) -> dict
 
 Backed by Gemini today (google-genai). The shape is intentionally minimal so
 that swapping to OpenAI / Anthropic / a sponsor SDK later is a one-file change.
@@ -16,6 +17,7 @@ from typing import Any, Literal
 
 from google import genai
 from google.genai import types
+from pydantic import BaseModel
 
 from app.config import settings
 
@@ -90,13 +92,26 @@ def _wants_thinking_disabled(tier: Tier, model: str) -> bool:
     return tier == "fast" and "2.5" in model
 
 
+def _strip_code_fences(text: str) -> str:
+    """Defensive — strip ```json ... ``` if a provider sneaks them in."""
+    text = text.strip()
+    if not text.startswith("```"):
+        return text
+    lines = text.splitlines()
+    if lines and lines[0].startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip().startswith("```"):
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
+
+
 async def complete(
     messages: list[Message],
     tier: Tier = "fast",
     *,
     temperature: float = 0.7,
     max_output_tokens: int | None = None,
-    response_schema: dict[str, Any] | None = None,
+    response_schema: dict[str, Any] | type[BaseModel] | None = None,
 ) -> str:
     """Single async completion.
 
@@ -107,8 +122,9 @@ async def complete(
         max_output_tokens: Optional ceiling. NOTE on Gemini 2.5: total budget
             covers both visible output AND thinking tokens, so set this with
             headroom or rely on thinking being disabled (see fast-tier rule).
-        response_schema: If given, the provider will be asked for JSON matching
-            this schema. The returned string is JSON text — caller parses it.
+        response_schema: A Pydantic model class OR an OpenAPI-style dict.
+            If given, the provider returns JSON matching the schema. The
+            returned string is JSON text — caller parses it.
 
     Returns:
         The assistant's text content. Empty string if the provider returned no
@@ -125,7 +141,7 @@ async def complete(
         config.max_output_tokens = max_output_tokens
     if response_schema is not None:
         config.response_mime_type = "application/json"
-        config.response_schema = response_schema
+        config.response_schema = response_schema  # SDK accepts Pydantic class or dict
     if _wants_thinking_disabled(tier, model):
         config.thinking_config = types.ThinkingConfig(thinking_budget=0)
 
@@ -145,11 +161,11 @@ async def complete_json(
     messages: list[Message],
     tier: Tier = "strong",
     *,
-    schema: dict[str, Any],
-    temperature: float = 0.2,
+    schema: dict[str, Any] | type[BaseModel],
+    temperature: float = 0.4,
     max_output_tokens: int | None = None,
 ) -> Any:
-    """Convenience wrapper: ask for JSON and parse it.
+    """Ask for JSON and parse it.
 
     Used by the Scenario Engine and Evaluators where structured output is
     mandatory. Raises LLMError if the provider returns un-parseable JSON.
@@ -161,6 +177,7 @@ async def complete_json(
         max_output_tokens=max_output_tokens,
         response_schema=schema,
     )
+    raw = _strip_code_fences(raw)
     try:
         return json.loads(raw)
     except json.JSONDecodeError as exc:
