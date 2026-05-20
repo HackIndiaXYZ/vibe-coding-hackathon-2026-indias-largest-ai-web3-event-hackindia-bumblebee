@@ -97,7 +97,9 @@ async def generate_scenario(
                 tier="strong",
                 schema=Scenario,
                 temperature=0.85,  # we want creative, varied scenarios
-                max_output_tokens=4096,
+                # Budget covers thinking tokens AND visible JSON on Gemini 2.5
+                # strong tier — a starter_artifact alone can run 1.5-2k tokens.
+                max_output_tokens=8192,
             )
             return Scenario.model_validate(raw)
         except (LLMError, ValidationError, KeyError, TypeError) as exc:

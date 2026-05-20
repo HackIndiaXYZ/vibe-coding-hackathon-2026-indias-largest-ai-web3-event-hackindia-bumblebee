@@ -18,6 +18,7 @@ from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconn
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session as DbSession
 
+from app.agents.assistant import assistant_reply as _default_assistant_reply
 from app.agents.scenario_engine import (
     Scenario,
     ScenarioGenerationError,
@@ -27,8 +28,18 @@ from app.config import settings
 from app.db import engine, get_session, init_db
 from app.models import Actor, Session as SessionModel, SessionStatus
 from app.orchestrator import CHANNELS, SessionOrchestrator, history_for_channel
-from app.schemas import CreateSessionRequest, SessionResponse
+from app.schemas import (
+    ArtifactSnapshotRequest,
+    ArtifactSnapshotResponse,
+    AssistantQueryRequest,
+    AssistantQueryResponse,
+    CreateSessionRequest,
+    EventResponse,
+    SessionResponse,
+)
 from app.telemetry import get_events, log_event
+
+AssistantReplyFn = Callable[..., Awaitable[str]]
 
 # Callable signature: (role: str) -> awaitable Scenario.
 ScenarioGenerator = Callable[[str], Awaitable[Scenario]]
@@ -58,6 +69,14 @@ def get_scenario_generator() -> ScenarioGenerator:
     `app.dependency_overrides[get_scenario_generator] = ...`.
     """
     return generate_scenario
+
+
+def get_assistant_reply() -> AssistantReplyFn:
+    """Dependency providing the AI assistant reply function.
+
+    Test code overrides this with a fake to avoid LLM calls.
+    """
+    return _default_assistant_reply
 
 
 def _to_response(s: SessionModel) -> SessionResponse:
@@ -194,6 +213,154 @@ async def end_session(
     db.refresh(session)
     log_event(db, session=session, actor=Actor.SYSTEM, type="session_end")
     return _to_response(session)
+
+
+# ---------- work-surface telemetry + AI assistant ----------
+
+
+@app.post(
+    "/sessions/{session_id}/artifact",
+    response_model=ArtifactSnapshotResponse,
+    status_code=201,
+)
+async def post_artifact_snapshot(
+    session_id: str,
+    req: ArtifactSnapshotRequest,
+    db: DbSession = Depends(get_session),
+) -> ArtifactSnapshotResponse:
+    """Log a snapshot of the candidate's current work surface.
+
+    Frontend calls this:
+      - on debounced typing (~3-5s of inactivity), trigger="debounce"
+      - on an explicit save/send action, trigger="send"
+    Each call appends an `artifact_snapshot` event. Evaluators in Phase 5
+    will read these to understand how the artifact evolved.
+    """
+    session = db.get(SessionModel, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    event = log_event(
+        db,
+        session=session,
+        actor=Actor.CANDIDATE,
+        type="artifact_snapshot",
+        payload={
+            "filename": req.filename,
+            "content": req.content,
+            "trigger": req.trigger,
+        },
+    )
+    return ArtifactSnapshotResponse(
+        ts_ms=event.ts_ms, filename=req.filename, bytes=len(req.content)
+    )
+
+
+@app.post(
+    "/sessions/{session_id}/assistant",
+    response_model=AssistantQueryResponse,
+)
+async def post_assistant_query(
+    session_id: str,
+    req: AssistantQueryRequest,
+    db: DbSession = Depends(get_session),
+    assistant_fn: AssistantReplyFn = Depends(get_assistant_reply),
+) -> AssistantQueryResponse:
+    """Run one AI-assistant turn.
+
+    Every query and every response is logged as a telemetry event — this is
+    what feeds the "Quality of AI Use" rubric axis in Phase 5.
+
+    The assistant sees:
+      - the session scenario (role + tasks),
+      - the candidate's most recent `artifact_snapshot` (their working file),
+      - the prior assistant turns in this session (so it has memory).
+    """
+    session = db.get(SessionModel, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if not session.scenario_json:
+        raise HTTPException(status_code=409, detail="Session has no scenario")
+    scenario = Scenario.model_validate(session.scenario_json)
+
+    # Reconstruct prior assistant transcript + latest artifact from event log.
+    events = get_events(db, session.id)
+    transcript: list[dict] = []
+    latest_artifact: str | None = None
+    for ev in events:
+        if not ev.payload:
+            continue
+        if ev.type == "ai_assistant_query":
+            transcript.append({"role": "user", "content": ev.payload.get("content", "")})
+        elif ev.type == "ai_assistant_response":
+            transcript.append({"role": "assistant", "content": ev.payload.get("content", "")})
+        elif ev.type == "artifact_snapshot":
+            latest_artifact = ev.payload.get("content", "") or latest_artifact
+
+    # Log the query FIRST so it appears before the response in the event log.
+    query_event = log_event(
+        db,
+        session=session,
+        actor=Actor.CANDIDATE,
+        type="ai_assistant_query",
+        payload={"content": req.prompt},
+    )
+
+    try:
+        response = await assistant_fn(
+            scenario=scenario,
+            latest_artifact=latest_artifact,
+            transcript=transcript,
+            query=req.prompt,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log_event(
+            db,
+            session=session,
+            actor=Actor.SYSTEM,
+            type="ai_assistant_error",
+            payload={"error": str(exc)},
+        )
+        raise HTTPException(status_code=502, detail=f"Assistant failed: {exc}") from exc
+
+    response_event = log_event(
+        db,
+        session=session,
+        actor=Actor.AI_ASSISTANT,
+        type="ai_assistant_response",
+        payload={"content": response},
+    )
+    return AssistantQueryResponse(
+        response=response,
+        query_ts_ms=query_event.ts_ms,
+        response_ts_ms=response_event.ts_ms,
+    )
+
+
+@app.get(
+    "/sessions/{session_id}/events",
+    response_model=list[EventResponse],
+)
+async def list_session_events(
+    session_id: str,
+    db: DbSession = Depends(get_session),
+) -> list[EventResponse]:
+    """Full event log for a session — ordered story used by Phase 5 evaluators."""
+    session = db.get(SessionModel, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    events = get_events(db, session.id)
+    return [
+        EventResponse(
+            id=e.id,  # type: ignore[arg-type]
+            session_id=e.session_id,
+            ts_ms=e.ts_ms,
+            ts_abs=e.ts_abs,
+            actor=e.actor,
+            type=e.type,
+            payload=e.payload,
+        )
+        for e in events
+    ]
 
 
 # ---------- websocket: per-session orchestrator ----------

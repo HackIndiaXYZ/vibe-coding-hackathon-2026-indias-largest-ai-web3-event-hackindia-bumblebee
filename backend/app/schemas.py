@@ -31,3 +31,27 @@ class EventResponse(BaseModel):
     actor: Actor
     type: str
     payload: dict
+
+
+class ArtifactSnapshotRequest(BaseModel):
+    filename: str = Field(..., min_length=1, max_length=200)
+    content: str = Field(..., max_length=200_000)
+    # Origin of the snapshot — debounced typing vs. an explicit save. Evaluators
+    # can use this to distinguish ambient state from intentional checkpoints.
+    trigger: str = Field("debounce", pattern="^(debounce|send|manual)$")
+
+
+class ArtifactSnapshotResponse(BaseModel):
+    ts_ms: int
+    filename: str
+    bytes: int
+
+
+class AssistantQueryRequest(BaseModel):
+    prompt: str = Field(..., min_length=1, max_length=10_000)
+
+
+class AssistantQueryResponse(BaseModel):
+    response: str
+    query_ts_ms: int
+    response_ts_ms: int
