@@ -1,31 +1,47 @@
 /* ============================================================
-   Day One — Design Tokens
+   Day One — v3 Design Tokens
    ------------------------------------------------------------
    THIS IS THE ONLY FILE YOU NEED TO EDIT TO RE-SKIN THE UI.
-   Every color, font, radius, and spacing value is declared here
-   as a Tailwind v4 @theme variable. Components consume these via
-   utility classes (e.g. bg-surface, text-fg, font-sans).
+   Every color, font, radius, and spacing value is declared
+   here as a Tailwind v4 @theme variable. Components consume
+   these via utility classes (bg-surface, text-fg, font-sans).
    ============================================================ */
 
 @theme {
   /* ---------- color palette ---------- */
-  --color-bg: #0b0c0f;            /* app background */
-  --color-surface: #15171c;       /* cards, channels, panels */
-  --color-surface-2: #1c1f26;     /* nested surface (e.g. AI panel) */
-  --color-border: #2a2d36;        /* subtle dividers */
-  --color-fg: #f4f4f5;            /* primary text */
-  --color-muted: #9ca3af;         /* secondary text */
-  --color-faint: #6b7280;         /* timestamps, labels */
+  --color-bg: #0a0b10;
+  --color-surface: #14161c;
+  --color-surface-2: #1c1f28;
+  --color-surface-3: #242833;
+  --color-border: #2a2e3a;
+  --color-border-strong: #3a3f4d;
+  --color-fg: #f5f6f9;
+  --color-muted: #9aa0b2;
+  --color-faint: #6a7080;
 
-  --color-accent: #60a5fa;        /* primary actions, links */
-  --color-accent-hover: #93c5fd;
-  --color-warning: #f59e0b;       /* timer warnings, twist accent */
-  --color-success: #10b981;       /* finished states, high scores */
-  --color-danger: #ef4444;        /* low scores, errors */
+  --color-accent: #7c9cff;          /* primary actions / brand */
+  --color-accent-hover: #a3bbff;
+  --color-accent-soft: #2a3460;     /* tinted surfaces */
 
-  --color-pm: #a78bfa;            /* channel accents */
+  --color-warning: #f5b85a;
+  --color-success: #4ade80;
+  --color-danger: #ef4f5f;
+
+  /* Format chips */
+  --color-format-a: #a78bfa;
+  --color-format-b: #34d399;
+
+  /* Channel accents */
+  --color-pm: #a78bfa;
   --color-reviewer: #f472b6;
-  --color-teammate: #34d399;
+  --color-peer: #34d399;
+
+  /* Band tones (qualitative) */
+  --color-band-strong: #4ade80;
+  --color-band-solid: #7dd3fc;
+  --color-band-mixed: #fbbf24;
+  --color-band-limited: #fb923c;
+  --color-band-insufficient: #ef4f5f;
 
   /* ---------- typography ---------- */
   --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -36,9 +52,12 @@
   --radius-md: 8px;
   --radius-lg: 12px;
   --radius-xl: 16px;
+  --radius-2xl: 24px;
 
-  /* ---------- layout rails (work-surface columns) ---------- */
-  --layout-channel-rail: 16rem;   /* left channel column width */
-  --layout-assistant-rail: 22rem; /* right AI assistant column width */
-  --layout-topbar: 3.5rem;        /* top bar height */
+  /* ---------- layout rails ---------- */
+  --layout-topnav: 3rem;
+  --layout-topbar: 3.5rem;
+  --layout-channel-rail: 17rem;
+  --layout-assistant-rail: 22rem;
+  --layout-task-rail: 18rem;  /* Format B left rail */
 }

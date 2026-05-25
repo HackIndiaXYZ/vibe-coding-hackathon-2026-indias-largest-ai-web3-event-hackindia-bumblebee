@@ -1,59 +1,75 @@
 /**
- * Global session store (Zustand).
+ * Global session + UI store — v3.0.
  *
- * Holds everything the screens need: active sessionId, scenario, channel
- * messages, work-surface content, assistant transcript, WS connection,
- * scorecard. Screens subscribe via `useStore(selector)`.
+ * v3 changes:
+ *   - Format-aware (A vs B).
+ *   - Per-task work-surface buffers for Format B.
+ *   - Accessibility prefs persisted in-store + applied to <html>.
+ *   - Integrity event capture (tab focus + paste attribution) — descriptive,
+ *     never scored; surfaces in the recruiter view and the scorecard
+ *     Integrity Context section.
  */
 import { create } from "zustand";
 
-import { api } from "../api/client";
+import { api, type CreateSessionPayload } from "../api/client";
 import { openSessionSocket, sendCandidateMessage } from "../api/ws";
 import type {
+  AccessibilityPrefs,
+  AnyScenario,
   AssistantTurn,
   Channel,
   ChatMessage,
-  Scenario,
+  IntegrityTier,
   Scorecard,
+  ScenarioA,
+  ScenarioB,
+  SessionFormat,
   SessionResponse,
   SessionStatus,
 } from "../types";
-
-/** Local mirror of the backend countdown — falls back if /env not propagated. */
-export const SESSION_MAX_SECONDS = 1500; // 25 min
+import { DEFAULT_ACCESSIBILITY, isFormatA } from "../types";
 
 type ChannelMessages = Record<Channel, ChatMessage[]>;
 type ChannelTyping = Record<Channel, boolean>;
 
-const emptyChannels = (): ChannelMessages => ({ pm: [], reviewer: [], teammate: [] });
-const emptyTyping = (): ChannelTyping => ({ pm: false, reviewer: false, teammate: false });
+const emptyChannels = (): ChannelMessages => ({ pm: [], reviewer: [], peer: [] });
+const emptyTyping = (): ChannelTyping => ({ pm: false, reviewer: false, peer: false });
 
 interface SessionState {
   sessionId: string | null;
   status: SessionStatus | "idle";
-  scenario: Scenario | null;
+  format: SessionFormat;
+  isPractice: boolean;
+  integrityTier: IntegrityTier;
+  sessionMinutes: number;
+  scenario: AnyScenario | null;
   startedAt: number | null; // ms epoch
   endedAt: number | null;
 
+  // Format A surfaces
   channels: ChannelMessages;
   activeChannel: Channel;
   typing: ChannelTyping;
-
-  workSurface: string;
-  workSurfaceFilename: string;
-
   assistantTurns: AssistantTurn[];
   assistantPending: boolean;
 
+  // Work surface — A uses a single buffer; B keys by task id.
+  workSurface: string;
+  workSurfaceFilename: string;
+  taskBuffers: Record<string, string>; // Format B: task_id → code
+  activeTaskId: string | null; // Format B
+
   wsState: "closed" | "connecting" | "open";
   lastError: string | null;
+
+  accessibility: AccessibilityPrefs;
 
   scorecard: Scorecard | null;
   scorecardLoading: boolean;
 }
 
 interface SessionActions {
-  createSession: (role: string) => Promise<string>;
+  createSession: (payload: CreateSessionPayload) => Promise<string>;
   loadSession: (sid: string) => Promise<void>;
   startSession: () => Promise<void>;
   connectWS: (sid: string) => void;
@@ -61,10 +77,20 @@ interface SessionActions {
   setActiveChannel: (channel: Channel) => void;
   sendMessage: (content: string) => void;
   setWorkSurface: (content: string) => void;
+  setActiveTask: (taskId: string) => void;
+  setTaskBuffer: (taskId: string, content: string) => void;
   flushArtifact: (trigger: "debounce" | "send" | "manual") => Promise<void>;
   sendAssistantQuery: (prompt: string) => Promise<void>;
   finishSession: () => Promise<void>;
   loadScorecard: () => Promise<void>;
+  logTabFocus: (kind: "lost" | "regained", awayMs?: number) => Promise<void>;
+  logPaste: (
+    target: "work_surface" | "chat" | "assistant",
+    bytes: number,
+    source: "external" | "internal" | "unknown",
+    preview: string,
+  ) => Promise<void>;
+  updateAccessibility: (patch: Partial<AccessibilityPrefs>) => void;
   reset: () => void;
 }
 
@@ -73,6 +99,10 @@ type Store = SessionState & SessionActions;
 const initial: SessionState = {
   sessionId: null,
   status: "idle",
+  format: "A",
+  isPractice: false,
+  integrityTier: "standard",
+  sessionMinutes: 60,
   scenario: null,
   startedAt: null,
   endedAt: null,
@@ -81,26 +111,60 @@ const initial: SessionState = {
   typing: emptyTyping(),
   workSurface: "",
   workSurfaceFilename: "main.py",
+  taskBuffers: {},
+  activeTaskId: null,
   assistantTurns: [],
   assistantPending: false,
   wsState: "closed",
   lastError: null,
+  accessibility: { ...DEFAULT_ACCESSIBILITY },
   scorecard: null,
   scorecardLoading: false,
 };
 
+function sessionMaxSeconds(session: Pick<SessionState, "sessionMinutes" | "accessibility">): number {
+  return Math.round(
+    session.sessionMinutes * 60 * (session.accessibility.extended_time_multiplier ?? 1.0),
+  );
+}
+
 function fromSession(r: SessionResponse): Partial<SessionState> {
-  const scenario =
-    (r.scenario as Scenario | undefined) && Object.keys(r.scenario).length
-      ? (r.scenario as Scenario)
+  const raw =
+    (r.scenario as AnyScenario | undefined) && Object.keys(r.scenario).length
+      ? (r.scenario as AnyScenario)
       : null;
+  const scenario: AnyScenario | null = raw;
+  let workSurface = "";
+  let taskBuffers: Record<string, string> = {};
+  let activeTaskId: string | null = null;
+  let workSurfaceFilename = "main.py";
+
+  if (scenario) {
+    if (isFormatA(scenario)) {
+      workSurface = (scenario as ScenarioA).starter_artifact ?? "";
+    } else {
+      const sb = scenario as ScenarioB;
+      taskBuffers = Object.fromEntries(sb.tasks.map((t) => [t.id, t.starter_code]));
+      activeTaskId = sb.tasks[0]?.id ?? null;
+      workSurface = activeTaskId ? taskBuffers[activeTaskId] : "";
+      workSurfaceFilename = activeTaskId ? `${activeTaskId}.py` : "main.py";
+    }
+  }
   return {
     sessionId: r.id,
     status: r.status,
+    format: r.format,
+    isPractice: r.is_practice,
+    integrityTier: r.integrity_tier,
+    sessionMinutes: r.session_minutes,
     scenario,
+    accessibility: { ...DEFAULT_ACCESSIBILITY, ...r.accessibility },
     startedAt: r.started_at ? Date.parse(r.started_at) : null,
     endedAt: r.ended_at ? Date.parse(r.ended_at) : null,
-    workSurface: scenario?.starter_artifact ?? "",
+    workSurface,
+    workSurfaceFilename,
+    taskBuffers,
+    activeTaskId,
   };
 }
 
@@ -110,24 +174,24 @@ let socket: WebSocket | null = null;
 export const useStore = create<Store>((set, get) => ({
   ...initial,
 
-  createSession: async (role) => {
+  createSession: async (payload) => {
     set({ lastError: null });
-    const session = await api.createSession(role);
-    set({ ...fromSession(session) });
-    return session.id;
+    const r = await api.createSession(payload);
+    set({ ...fromSession(r) });
+    return r.id;
   },
 
   loadSession: async (sid) => {
     set({ lastError: null });
-    const session = await api.getSession(sid);
-    set({ ...fromSession(session) });
+    const r = await api.getSession(sid);
+    set({ ...fromSession(r) });
   },
 
   startSession: async () => {
     const { sessionId } = get();
     if (!sessionId) return;
-    const session = await api.startSession(sessionId);
-    set({ ...fromSession(session) });
+    const r = await api.startSession(sessionId);
+    set({ ...fromSession(r) });
   },
 
   connectWS: (sid) => {
@@ -144,9 +208,8 @@ export const useStore = create<Store>((set, get) => ({
       sid,
       (frame) => {
         if (frame.type === "ready") {
-          // Hydrate channel histories from the event log replay.
           const channels = emptyChannels();
-          (["pm", "reviewer", "teammate"] as Channel[]).forEach((ch) => {
+          (["pm", "reviewer", "peer"] as Channel[]).forEach((ch) => {
             channels[ch] = frame.history[ch] ?? [];
           });
           set({ channels, wsState: "open" });
@@ -180,7 +243,6 @@ export const useStore = create<Store>((set, get) => ({
           };
           set((s) => ({
             channels: { ...s.channels, pm: [...s.channels.pm, msg] },
-            // Bring the candidate's attention to the PM channel.
             activeChannel: "pm",
           }));
           return;
@@ -211,12 +273,12 @@ export const useStore = create<Store>((set, get) => ({
   sendMessage: (content) => {
     const trimmed = content.trim();
     if (!trimmed || !socket) return;
-    const { activeChannel } = get();
+    const { activeChannel, startedAt } = get();
     const candidateMsg: ChatMessage = {
       kind: "candidate",
       channel: activeChannel,
       content: trimmed,
-      ts_ms: get().startedAt ? Date.now() - (get().startedAt as number) : 0,
+      ts_ms: startedAt ? Date.now() - startedAt : 0,
     };
     set((s) => ({
       channels: {
@@ -227,7 +289,27 @@ export const useStore = create<Store>((set, get) => ({
     sendCandidateMessage(socket, activeChannel, trimmed);
   },
 
-  setWorkSurface: (content) => set({ workSurface: content }),
+  setWorkSurface: (content) => {
+    const { activeTaskId, format } = get();
+    set({ workSurface: content });
+    if (format === "B" && activeTaskId) {
+      set((s) => ({ taskBuffers: { ...s.taskBuffers, [activeTaskId]: content } }));
+    }
+  },
+
+  setActiveTask: (taskId) => {
+    const { taskBuffers, format } = get();
+    if (format !== "B") return;
+    const next = taskBuffers[taskId] ?? "";
+    set({
+      activeTaskId: taskId,
+      workSurface: next,
+      workSurfaceFilename: `${taskId}.py`,
+    });
+  },
+
+  setTaskBuffer: (taskId, content) =>
+    set((s) => ({ taskBuffers: { ...s.taskBuffers, [taskId]: content } })),
 
   flushArtifact: async (trigger) => {
     const { sessionId, workSurface, workSurfaceFilename } = get();
@@ -235,14 +317,17 @@ export const useStore = create<Store>((set, get) => ({
     try {
       await api.postArtifact(sessionId, workSurfaceFilename, workSurface, trigger);
     } catch (e) {
-      // Snapshots are best-effort; surface as a soft error.
       set({ lastError: `snapshot failed: ${(e as Error).message}` });
     }
   },
 
   sendAssistantQuery: async (prompt) => {
-    const { sessionId } = get();
+    const { sessionId, format } = get();
     if (!sessionId) return;
+    if (format !== "A") {
+      set({ lastError: "AI assistant is disabled in Format B." });
+      return;
+    }
     const queryTurn: AssistantTurn = { role: "user", content: prompt, ts_ms: Date.now() };
     set((s) => ({
       assistantTurns: [...s.assistantTurns, queryTurn],
@@ -266,12 +351,10 @@ export const useStore = create<Store>((set, get) => ({
   finishSession: async () => {
     const { sessionId } = get();
     if (!sessionId) return;
-    // Flush a final 'send' snapshot before closing so the evaluator sees the
-    // final state of the work surface.
     await get().flushArtifact("send");
     get().disconnectWS();
-    const session = await api.endSession(sessionId);
-    set({ ...fromSession(session) });
+    const r = await api.endSession(sessionId);
+    set({ ...fromSession(r) });
   },
 
   loadScorecard: async () => {
@@ -288,8 +371,51 @@ export const useStore = create<Store>((set, get) => ({
     }
   },
 
+  logTabFocus: async (kind, awayMs) => {
+    const { sessionId, status } = get();
+    if (!sessionId || status !== "active") return;
+    try {
+      await api.postTabFocus(sessionId, kind, awayMs);
+    } catch {
+      /* best-effort — never block the candidate on telemetry */
+    }
+  },
+
+  logPaste: async (target, bytes, source, preview) => {
+    const { sessionId, status } = get();
+    if (!sessionId || status !== "active") return;
+    try {
+      await api.postPaste(sessionId, target, bytes, source, preview);
+    } catch {
+      /* best-effort */
+    }
+  },
+
+  updateAccessibility: (patch) => {
+    set((s) => ({ accessibility: { ...s.accessibility, ...patch } }));
+    applyAccessibilityToDocument(get().accessibility);
+  },
+
   reset: () => {
     get().disconnectWS();
     set({ ...initial });
+    applyAccessibilityToDocument(DEFAULT_ACCESSIBILITY);
   },
 }));
+
+// ---- side-effects: apply accessibility prefs to <html> ----
+
+export function applyAccessibilityToDocument(prefs: AccessibilityPrefs) {
+  if (typeof document === "undefined") return;
+  const root = document.documentElement;
+  root.classList.toggle("a11y-reduced-motion", prefs.reduced_motion);
+  root.classList.toggle("a11y-high-contrast", prefs.high_contrast);
+  root.classList.toggle("a11y-dyslexia", prefs.dyslexia_font);
+  root.dataset.a11yMode = prefs.mode_enabled ? "on" : "off";
+}
+
+// ---- derived: session timer ----
+
+export function maxSecondsFor(s: Pick<SessionState, "sessionMinutes" | "accessibility">) {
+  return sessionMaxSeconds(s);
+}

@@ -26,3 +26,62 @@ button {
 code, pre {
   font-family: var(--font-mono);
 }
+
+/* ============================================================
+   Accessibility modes (toggle via root classes / data attribute)
+   Set by store.applyAccessibilityToDocument().
+   ============================================================ */
+
+html.a11y-reduced-motion *,
+html.a11y-reduced-motion *::before,
+html.a11y-reduced-motion *::after {
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.001ms !important;
+  scroll-behavior: auto !important;
+}
+
+html.a11y-high-contrast {
+  --color-bg: #000000;
+  --color-surface: #0a0a0a;
+  --color-surface-2: #121212;
+  --color-surface-3: #1a1a1a;
+  --color-border: #5a5a5a;
+  --color-border-strong: #c0c0c0;
+  --color-fg: #ffffff;
+  --color-muted: #d0d0d0;
+  --color-faint: #a0a0a0;
+  --color-accent: #ffd35a;
+  --color-accent-hover: #ffe78a;
+}
+
+html.a11y-dyslexia body,
+html.a11y-dyslexia input,
+html.a11y-dyslexia textarea,
+html.a11y-dyslexia button {
+  font-family: "Atkinson Hyperlegible", "OpenDyslexic", "Verdana", system-ui, sans-serif;
+  letter-spacing: 0.01em;
+  line-height: 1.7;
+}
+
+/* Visible focus outline on every interactive element when keyboard-navigating. */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* Skip link (rendered by TopNav) — visible on focus. */
+.skip-link {
+  position: absolute;
+  left: -10000px;
+  top: 0.5rem;
+  background: var(--color-surface);
+  color: var(--color-fg);
+  padding: 0.5rem 0.75rem;
+  border-radius: var(--radius-md);
+  z-index: 9999;
+}
+.skip-link:focus {
+  left: 0.5rem;
+}
