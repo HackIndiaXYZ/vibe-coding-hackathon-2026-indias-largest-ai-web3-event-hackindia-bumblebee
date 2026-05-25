@@ -1,9 +1,9 @@
 /**
  * Active channel's conversation: message thread + typing indicator + input.
- * Handles three message kinds:
+ * Three message kinds:
  *   - "candidate"           → right-aligned bubble
  *   - "agent"               → left-aligned with actor_name
- *   - "requirement_change"  → full-width inline notification (subtle accent)
+ *   - "requirement_change"  → full-width inline notification (warning accent)
  */
 import { useEffect, useRef, useState } from "react";
 
@@ -46,7 +46,7 @@ export default function ChatChannel({
   };
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full" data-surface="chat">
       <header className="px-3 py-2 border-b border-border bg-surface/60">
         <p className="text-sm text-fg">
           <span className="text-faint">#</span>
@@ -135,11 +135,7 @@ export default function ChatChannel({
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           disabled={disabled}
-          placeholder={
-            disabled
-              ? "connecting…"
-              : `Message ${persona?.name ?? `#${channel}`}…`
-          }
+          placeholder={disabled ? "connecting…" : `Message ${persona?.name ?? `#${channel}`}…`}
           className="flex-1 bg-bg border border-border rounded-md px-3 py-1.5 text-sm placeholder:text-faint focus:outline-none focus:border-accent disabled:opacity-50"
         />
         <button

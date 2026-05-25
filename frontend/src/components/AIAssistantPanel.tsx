@@ -1,10 +1,9 @@
 /**
- * Right rail — the AI assistant.
+ * Right rail — the AI assistant (Format A only; not rendered for Format B).
  *
- * Visually distinct from the cast channels (different surface, an
- * "AI Assistant" label) so it's obvious "this is the AI helper; using it
- * is allowed." Each turn POSTs to /sessions/{id}/assistant which logs the
- * query and response for the AI-Use evaluator.
+ * Visually distinct from cast channels — "this is the AI helper; using it is
+ * allowed." Each turn POSTs to /sessions/{id}/assistant which logs the query
+ * and response, feeding the AI-Use rubric.
  */
 import { useEffect, useRef, useState } from "react";
 
@@ -39,7 +38,7 @@ export default function AIAssistantPanel() {
           <span>AI Assistant</span>
         </p>
         <p className="text-[11px] text-faint mt-0.5">
-          Yours to use. Every turn is logged.
+          Yours to use. Every turn is logged. We score quality of use, not presence.
         </p>
       </header>
 

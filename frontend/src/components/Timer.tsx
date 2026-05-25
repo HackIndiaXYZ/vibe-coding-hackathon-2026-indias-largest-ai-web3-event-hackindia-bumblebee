@@ -1,17 +1,17 @@
 /**
- * Top-bar countdown. Counts DOWN from SESSION_MAX_SECONDS, ticks once per second,
- * accents to warning color in the final minute. Always-visible per §7 spec.
+ * Top-bar countdown. Reads session-length + accessibility multiplier from the
+ * store. Accents to warning under 60s, danger at zero.
  */
 import { useEffect, useState } from "react";
 
-import { SESSION_MAX_SECONDS } from "../state/store";
+import { maxSecondsFor, useStore } from "../state/store";
 
-interface Props {
-  startedAt: number | null;
-}
-
-export default function Timer({ startedAt }: Props) {
+export default function Timer() {
+  const startedAt = useStore((s) => s.startedAt);
+  const sessionMinutes = useStore((s) => s.sessionMinutes);
+  const accessibility = useStore((s) => s.accessibility);
   const [now, setNow] = useState(() => Date.now());
+
   useEffect(() => {
     if (!startedAt) return;
     const id = setInterval(() => setNow(Date.now()), 1000);
@@ -21,18 +21,23 @@ export default function Timer({ startedAt }: Props) {
   if (!startedAt) {
     return <span className="font-mono text-faint tabular-nums">--:--</span>;
   }
+  const max = maxSecondsFor({ sessionMinutes, accessibility });
   const elapsed = Math.floor((now - startedAt) / 1000);
-  const remaining = Math.max(0, SESSION_MAX_SECONDS - elapsed);
+  const remaining = Math.max(0, max - elapsed);
   const m = Math.floor(remaining / 60);
   const s = remaining % 60;
   const tone =
-    remaining === 0
-      ? "text-danger"
-      : remaining < 60
-        ? "text-warning"
-        : "text-fg";
+    remaining === 0 ? "text-danger" : remaining < 60 ? "text-warning" : "text-fg";
   return (
-    <span className={`font-mono tabular-nums ${tone}`} aria-label="time remaining">
+    <span
+      className={`font-mono tabular-nums ${tone}`}
+      aria-label="time remaining"
+      title={
+        accessibility.extended_time_multiplier !== 1
+          ? `Extended time ${accessibility.extended_time_multiplier}× active`
+          : undefined
+      }
+    >
       {`${m}:${s.toString().padStart(2, "0")}`}
     </span>
   );

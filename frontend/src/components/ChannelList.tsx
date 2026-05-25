@@ -1,8 +1,4 @@
-/**
- * Channel switcher (left rail). Three Slack-style channels: #pm, #reviewer,
- * #teammate. Each shows the persona name + an unread dot when there are
- * unread messages in an inactive channel.
- */
+/** Channel switcher (left rail) — #pm / #reviewer / #peer. */
 import type { Cast, Channel, ChatMessage } from "../types";
 import { CHANNELS } from "../types";
 
@@ -17,7 +13,7 @@ interface Props {
 const CHANNEL_ACCENT: Record<Channel, string> = {
   pm: "text-pm",
   reviewer: "text-reviewer",
-  teammate: "text-teammate",
+  peer: "text-peer",
 };
 
 export default function ChannelList({ cast, active, channels, unread, onSelect }: Props) {

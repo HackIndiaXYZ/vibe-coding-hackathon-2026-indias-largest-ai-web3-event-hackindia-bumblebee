@@ -1,13 +1,10 @@
-/**
- * Collapsible task brief — sits on the top bar. Click the title to expand
- * the task list inline. Per §7 layout spec.
- */
+/** Collapsible task brief in the top bar — works for both Formats. */
 import { useState } from "react";
 
-import type { Scenario } from "../types";
+import type { AnyScenario } from "../types";
 
 interface Props {
-  scenario: Scenario | null;
+  scenario: AnyScenario | null;
 }
 
 export default function TaskBrief({ scenario }: Props) {
