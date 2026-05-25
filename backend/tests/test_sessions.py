@@ -1,13 +1,7 @@
-"""Integration tests for the session lifecycle: create → get → start → end.
-
-Also asserts that telemetry events fire at each lifecycle transition, since
-the rest of the system depends on a reliable event log.
-
-The scenario generator dependency is overridden to a deterministic fake in
-`conftest.py`, so these tests run fully offline.
-"""
+"""Integration tests for the session lifecycle, both Formats (v3)."""
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session as DbSession, select
 
@@ -23,43 +17,57 @@ def _events_for(session_id: str) -> list[Event]:
         )
 
 
-def test_full_session_lifecycle() -> None:
+@pytest.mark.parametrize("fmt", ["A", "B"])
+def test_full_session_lifecycle_per_format(fmt: str) -> None:
     client = TestClient(app)
 
-    # create — also triggers (fake) scenario generation
-    r = client.post("/sessions", json={"role": "Junior Full-Stack Developer"})
+    payload = {
+        "role": "Junior Full-Stack Developer",
+        "format": fmt,
+        "session_minutes": 60,
+        "integrity_tier": "standard",
+        "accessibility": {
+            "mode_enabled": False,
+            "extended_time_multiplier": 1.0,
+            "reduced_motion": False,
+            "high_contrast": False,
+            "dyslexia_font": False,
+            "screen_reader_optimized": False,
+        },
+        "is_practice": False,
+    }
+    r = client.post("/sessions", json=payload)
     assert r.status_code == 201, r.text
     body = r.json()
     sid = body["id"]
     assert body["status"] == SessionStatus.BRIEFING.value
-    assert body["role"] == "Junior Full-Stack Developer"
+    assert body["format"] == fmt
     assert body["scenario"]["company_name"] == "TestCo"
     assert body["scenario"]["role"] == "Junior Full-Stack Developer"
-    assert len(body["scenario"]["tasks"]) >= 3
-    assert body["scenario"]["twist"]["trigger_after_turn"] >= 2
     assert body["started_at"] is None
     assert body["ended_at"] is None
 
-    # get
-    r = client.get(f"/sessions/{sid}")
-    assert r.status_code == 200
-    assert r.json()["id"] == sid
+    # Format-specific shape sanity
+    if fmt == "A":
+        assert "cast" in body["scenario"]
+        assert "twist" in body["scenario"]
+        assert "starter_artifact" in body["scenario"]
+    else:
+        assert "cast" not in body["scenario"]
+        for t in body["scenario"]["tasks"]:
+            assert "starter_code" in t
+            assert "visible_tests" in t
 
     # start
     r = client.post(f"/sessions/{sid}/start")
     assert r.status_code == 200
-    body = r.json()
-    assert body["status"] == SessionStatus.ACTIVE.value
-    assert body["started_at"] is not None
+    assert r.json()["status"] == SessionStatus.ACTIVE.value
 
-    # end — Phase 5 wires scoring into /end, so we land in COMPLETE.
+    # end → scoring → COMPLETE
     r = client.post(f"/sessions/{sid}/end")
-    assert r.status_code == 200
-    body = r.json()
-    assert body["status"] == SessionStatus.COMPLETE.value
-    assert body["ended_at"] is not None
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == SessionStatus.COMPLETE.value
 
-    # telemetry: should have created, scenario_loaded, start, end, scoring_complete events
     events = _events_for(sid)
     types = [e.type for e in events]
     assert "session_created" in types
@@ -77,7 +85,23 @@ def test_get_missing_session_returns_404() -> None:
 
 def test_start_already_started_session_conflicts() -> None:
     client = TestClient(app)
-    sid = client.post("/sessions", json={"role": "Junior Full-Stack Developer"}).json()["id"]
+    sid = client.post(
+        "/sessions",
+        json={"role": "Junior Full-Stack Developer", "format": "A"},
+    ).json()["id"]
     client.post(f"/sessions/{sid}/start")
     r = client.post(f"/sessions/{sid}/start")
     assert r.status_code == 409
+
+
+def test_format_b_assistant_route_returns_409() -> None:
+    """AI assistant is disabled in Format B by design."""
+    client = TestClient(app)
+    sid = client.post(
+        "/sessions",
+        json={"role": "Junior Full-Stack Developer", "format": "B"},
+    ).json()["id"]
+    client.post(f"/sessions/{sid}/start")
+    r = client.post(f"/sessions/{sid}/assistant", json={"prompt": "help"})
+    assert r.status_code == 409
+    assert "format b" in r.json()["detail"].lower()

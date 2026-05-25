@@ -151,10 +151,10 @@ async def test_orchestrator_rehydrates_state_from_event_log() -> None:
     # PM transcript: 3 candidate msgs + 3 cast replies + 1 twist insert = 7
     assert len(rebuilt.transcripts["pm"]) == 7
     assert len(rebuilt.transcripts["reviewer"]) == 2  # 1 candidate + 1 agent
-    assert len(rebuilt.transcripts["teammate"]) == 0
+    assert len(rebuilt.transcripts["peer"]) == 0
 
 
-@pytest.mark.parametrize("channel", ["pm", "reviewer", "teammate"])
+@pytest.mark.parametrize("channel", ["pm", "reviewer", "peer"])
 async def test_handle_candidate_message_logs_actor_per_channel(channel: str) -> None:
     session = _make_active_session(role=f"Actor map {channel}")
     scenario = _build_fake_scenario(session.role)

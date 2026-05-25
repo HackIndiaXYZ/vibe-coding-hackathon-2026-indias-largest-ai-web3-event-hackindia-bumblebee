@@ -42,7 +42,7 @@ def test_ws_full_flow_pm_then_twist_then_reviewer(patch_cast_reply) -> None:
         # Initial handshake.
         ready = ws.receive_json()
         assert ready["type"] == "ready"
-        assert set(ready["history"].keys()) == {"pm", "reviewer", "teammate"}
+        assert set(ready["history"].keys()) == {"pm", "reviewer", "peer"}
 
         # Send 3 candidate messages to #pm (fake scenario triggers twist at turn 3).
         for i in (1, 2, 3):

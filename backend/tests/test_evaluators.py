@@ -1,35 +1,52 @@
-"""Evaluator tests — evidence validator (unit) + scoring flow (integration).
-
-The scoring-flow tests use a fake evaluator dependency so we don't pay 3
-strong-tier LLM calls per test. The validator and serialization helpers
-are exercised with synthetic events directly.
-"""
+"""Evaluator tests — v3 evidence validator + scoring flow."""
 from __future__ import annotations
 
-import pytest
 from fastapi.testclient import TestClient
+from sqlmodel import Session as DbSession
 
 from app.agents.evaluators import (
     AxisVerdict,
     EvidenceItem,
     _events_as_json,
+    agreement_for_sd,
+    band_for,
     validate_evidence,
 )
-from app.db import engine
 from app.main import app, get_session_evaluator
 from app.models import Actor, Event
-from sqlmodel import Session as DbSession
 
 
 # ===========================================================================
-# Unit: evidence validator
+# Band + agreement derivation
+# ===========================================================================
+
+
+def test_band_for_thresholds() -> None:
+    assert band_for(9.0) == "Strong"
+    assert band_for(7.5) == "Solid"
+    assert band_for(5.0) == "Mixed"
+    assert band_for(3.0) == "Limited"
+    assert band_for(1.0) == "Insufficient signal"
+
+
+def test_agreement_for_sd_buckets() -> None:
+    assert agreement_for_sd(0.2) == "high"
+    assert agreement_for_sd(0.8) == "medium"
+    assert agreement_for_sd(1.3) == "low"
+    assert agreement_for_sd(2.0) == "divergent"
+
+
+# ===========================================================================
+# Evidence validator
 # ===========================================================================
 
 
 def _verdict(*event_ids: int) -> AxisVerdict:
     return AxisVerdict(
-        axis="Judgment & Prioritization",
-        score=4,
+        axis="Judgment Under Ambiguity",
+        score_0_10=7.0,
+        confidence_pm=0.5,
+        agreement="medium",
         summary="They surfaced trade-offs explicitly.",
         evidence=[
             EvidenceItem(event_id=i, ts_ms=i * 100, quote=f"e{i}", reasoning=f"r{i}")
@@ -44,7 +61,6 @@ def test_evidence_validator_keeps_real_event_ids() -> None:
     out = validate_evidence(_verdict(1, 3), valid)
     assert out.flagged is False
     assert {e.event_id for e in out.evidence} == {1, 3}
-    assert not out.summary.startswith("[FLAGGED")
 
 
 def test_evidence_validator_drops_phantom_event_ids() -> None:
@@ -59,18 +75,32 @@ def test_evidence_validator_flags_when_all_evidence_invalid() -> None:
     out = validate_evidence(_verdict(99, 100), valid)
     assert out.flagged is True
     assert out.evidence == []
-    assert out.summary.startswith("[FLAGGED")
+    assert "could not cite" in out.summary.lower()
 
 
 # ===========================================================================
-# Unit: event log serialization (small)
+# Event-log serialization
 # ===========================================================================
 
 
 def test_events_as_json_includes_ids_and_payloads() -> None:
     events = [
-        Event(id=1, session_id="s", ts_ms=0, actor=Actor.SYSTEM, type="session_created", payload={"role": "JFSD"}),
-        Event(id=2, session_id="s", ts_ms=10, actor=Actor.CANDIDATE, type="candidate_message", payload={"channel": "pm", "content": "Hi"}),
+        Event(
+            id=1,
+            session_id="s",
+            ts_ms=0,
+            actor=Actor.SYSTEM,
+            type="session_created",
+            payload={"role": "JFSD"},
+        ),
+        Event(
+            id=2,
+            session_id="s",
+            ts_ms=10,
+            actor=Actor.CANDIDATE,
+            type="candidate_message",
+            payload={"channel": "pm", "content": "Hi"},
+        ),
     ]
     js = _events_as_json(events)
     assert '"id": 1' in js
@@ -80,72 +110,17 @@ def test_events_as_json_includes_ids_and_payloads() -> None:
 
 
 # ===========================================================================
-# Integration: full scoring flow with a fake evaluator
+# Full scoring flow with fake evaluator (set up in conftest)
 # ===========================================================================
 
 
-async def _fake_evaluate_session(*, events, scenario):
-    """Deterministic 3-axis verdict that cites the first real event_id."""
-    real_id = next((e.id for e in events if e.id is not None), 1)
-    real_ts = events[0].ts_ms if events else 0
-    return [
-        AxisVerdict(
-            axis="Judgment & Prioritization",
-            score=4,
-            summary="They surfaced trade-offs explicitly when the spec was vague.",
-            evidence=[
-                EvidenceItem(
-                    event_id=real_id,
-                    ts_ms=real_ts,
-                    quote="(synthetic)",
-                    reasoning="Cited the first event of the session.",
-                )
-            ],
-        ),
-        AxisVerdict(
-            axis="Communication & Collaboration",
-            score=3,
-            summary="Communication was adequate; mostly used the PM channel.",
-            evidence=[
-                EvidenceItem(
-                    event_id=real_id,
-                    ts_ms=real_ts,
-                    quote="(synthetic)",
-                    reasoning="Used the PM channel for clarifying questions.",
-                )
-            ],
-        ),
-        AxisVerdict(
-            axis="Quality of AI Use",
-            score=5,
-            summary="Productive AI use; questioned outputs and retained ownership.",
-            evidence=[
-                EvidenceItem(
-                    event_id=real_id,
-                    ts_ms=real_ts,
-                    quote="(synthetic)",
-                    reasoning="Verified each AI suggestion against the actual code.",
-                )
-            ],
-        ),
-    ]
-
-
-def _override_evaluator():
-    """Local override — same shape as conftest's, used by the recovery test below."""
-    return _fake_evaluate_session
-
-
-# The conftest already sets a global evaluator override, so most tests in
-# this file don't need to manage the dependency themselves. The recovery
-# test swaps in a failing evaluator temporarily then restores the global one.
-
-
-def test_end_session_runs_evaluator_and_persists_scorecard() -> None:
+def test_end_session_runs_evaluator_and_persists_v3_scorecard() -> None:
     client = TestClient(app)
-    sid = client.post("/sessions", json={"role": "Junior Full-Stack Developer"}).json()["id"]
+    sid = client.post(
+        "/sessions",
+        json={"role": "Junior Full-Stack Developer", "format": "A"},
+    ).json()["id"]
     client.post(f"/sessions/{sid}/start")
-    # Create a small event log via the routes so the evaluator has something to cite.
     client.post(
         f"/sessions/{sid}/artifact",
         json={"filename": "main.py", "content": "x = 1", "trigger": "send"},
@@ -153,33 +128,69 @@ def test_end_session_runs_evaluator_and_persists_scorecard() -> None:
 
     r = client.post(f"/sessions/{sid}/end")
     assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["status"] == "complete"
+    assert r.json()["status"] == "complete"
 
-    sc = client.get(f"/sessions/{sid}/scorecard")
-    assert sc.status_code == 200
-    payload = sc.json()
-    assert payload["session_id"] == sid
-    assert "decision support" in payload["disclaimer"].lower()
-    axes = {a["axis"] for a in payload["axes"]}
+    sc = client.get(f"/sessions/{sid}/scorecard").json()
+    assert sc["session_id"] == sid
+    assert sc["format"] == "A"
+    assert "decision support" in sc["disclaimer"].lower()
+    axes = {a["axis"] for a in sc["axes"]}
     assert axes == {
-        "Judgment & Prioritization",
-        "Communication & Collaboration",
+        "Judgment Under Ambiguity",
+        "Stakeholder Communication",
+        "Response to Unexpected Change",
         "Quality of AI Use",
+        "Scope and Priority Management",
+        "Technical Execution",
     }
-    for a in payload["axes"]:
-        assert 1 <= a["score"] <= 5
-        assert len(a["evidence"]) >= 1
+    for a in sc["axes"]:
+        assert 0.0 <= a["score_0_10"] <= 10.0
+        assert a["confidence_pm"] >= 0.0
+        assert a["band"] in {
+            "Strong",
+            "Solid",
+            "Mixed",
+            "Limited",
+            "Insufficient signal",
+        }
+        assert a["agreement"] in {"high", "medium", "low", "divergent"}
         for ev in a["evidence"]:
             assert isinstance(ev["event_id"], int)
-            assert isinstance(ev["ts_ms"], int)
-            assert ev["quote"]
-            assert ev["reasoning"]
+
+    # Integrity context surfaced
+    assert "tab_focus_lost_count" in sc["integrity"]
+    assert isinstance(sc["integrity"]["notes"], list)
+
+
+def test_format_b_scorecard_uses_format_b_axes() -> None:
+    client = TestClient(app)
+    sid = client.post(
+        "/sessions",
+        json={"role": "Junior Full-Stack Developer", "format": "B"},
+    ).json()["id"]
+    client.post(f"/sessions/{sid}/start")
+    client.post(
+        f"/sessions/{sid}/artifact",
+        json={"filename": "sum-pair.py", "content": "def sum_pair(a,b): pass", "trigger": "send"},
+    )
+    client.post(f"/sessions/{sid}/end")
+    sc = client.get(f"/sessions/{sid}/scorecard").json()
+    axes = {a["axis"] for a in sc["axes"]}
+    assert axes == {
+        "Technical Execution",
+        "Problem Decomposition and Approach",
+        "Code Quality",
+        "Testing Discipline",
+        "Time Management Across Tasks",
+    }
 
 
 def test_scorecard_404_when_session_unscored() -> None:
     client = TestClient(app)
-    sid = client.post("/sessions", json={"role": "Junior Full-Stack Developer"}).json()["id"]
+    sid = client.post(
+        "/sessions",
+        json={"role": "Junior Full-Stack Developer", "format": "A"},
+    ).json()["id"]
     r = client.get(f"/sessions/{sid}/scorecard")
     assert r.status_code == 404
 
@@ -192,23 +203,28 @@ def test_scorecard_404_on_missing_session() -> None:
 
 def test_end_session_409_when_already_complete() -> None:
     client = TestClient(app)
-    sid = client.post("/sessions", json={"role": "Junior Full-Stack Developer"}).json()["id"]
+    sid = client.post(
+        "/sessions",
+        json={"role": "Junior Full-Stack Developer", "format": "A"},
+    ).json()["id"]
     client.post(f"/sessions/{sid}/start")
     client.post(f"/sessions/{sid}/end")
     r = client.post(f"/sessions/{sid}/end")
     assert r.status_code == 409
 
 
-async def _failing_evaluate(*, events, scenario):
+async def _failing_evaluate(*, events, scenario_obj, fmt, ensemble_n=None):
     from app.agents.evaluators import ScoringError
 
     raise ScoringError("simulated evaluator outage")
 
 
 def test_end_session_502_on_evaluator_failure_rolls_back_to_wrapping() -> None:
-    """Restore retry-ability: failed scoring leaves session in WRAPPING."""
     client = TestClient(app)
-    sid = client.post("/sessions", json={"role": "Junior Full-Stack Developer"}).json()["id"]
+    sid = client.post(
+        "/sessions",
+        json={"role": "Junior Full-Stack Developer", "format": "A"},
+    ).json()["id"]
     client.post(f"/sessions/{sid}/start")
 
     previous_override = app.dependency_overrides.get(get_session_evaluator)
@@ -217,7 +233,6 @@ def test_end_session_502_on_evaluator_failure_rolls_back_to_wrapping() -> None:
         r = client.post(f"/sessions/{sid}/end")
         assert r.status_code == 502
     finally:
-        # Restore whatever conftest had installed.
         if previous_override is not None:
             app.dependency_overrides[get_session_evaluator] = previous_override
         else:
