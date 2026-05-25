@@ -1,8 +1,11 @@
-"""Generates a fictional company + role + tasks + planned twist.
+"""Format A — generates a fictional company + role + tasks + planned twist.
 
 One strong-tier Gemini call returning structured JSON, validated against a
 Pydantic schema. Retries once on malformed output; the second failure raises
 so the route can surface a 502 to the frontend.
+
+v3 change: cast persona "teammate" renamed to "peer" per §7 spec. The chat
+channel id remains stable for the WebSocket protocol.
 """
 from __future__ import annotations
 
@@ -34,7 +37,7 @@ class CastPersona(BaseModel):
 class Cast(BaseModel):
     pm: CastPersona
     reviewer: CastPersona
-    teammate: CastPersona
+    peer: CastPersona
 
 
 class Task(BaseModel):
@@ -76,11 +79,7 @@ async def generate_scenario(
     *,
     domain_hint: str = DEFAULT_DOMAIN_HINT,
 ) -> Scenario:
-    """Generate a fictional Day One scenario for the given candidate role.
-
-    One strong-tier Gemini call. Retries ONCE on malformed JSON or validation
-    failure, then raises ScenarioGenerationError.
-    """
+    """Generate a fictional Day One Format A scenario for the given role."""
     messages: list[Message] = [
         {"role": "system", "content": SCENARIO_SYSTEM},
         {
@@ -96,15 +95,12 @@ async def generate_scenario(
                 messages=messages,
                 tier="strong",
                 schema=Scenario,
-                temperature=0.85,  # we want creative, varied scenarios
-                # Budget covers thinking tokens AND visible JSON on Gemini 2.5
-                # strong tier — a starter_artifact alone can run 1.5-2k tokens.
+                temperature=0.85,
                 max_output_tokens=8192,
             )
             return Scenario.model_validate(raw)
         except (LLMError, ValidationError, KeyError, TypeError) as exc:
             last_err = exc
-            # Append a corrective nudge for the retry attempt.
             if attempt == 1:
                 messages.append(
                     {

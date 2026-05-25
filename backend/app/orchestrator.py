@@ -1,18 +1,10 @@
 """Per-session orchestrator: routes messages, injects the twist, logs everything.
 
-The orchestrator owns per-channel transcripts, the PM-turn counter, and the
-twist-fired flag. State is fully reconstructible from the telemetry event log,
-so reconnects are safe — `from_event_log()` rebuilds state from DB events.
+v3 rename: third channel "teammate" → "peer". Channel keys exposed over the
+WebSocket are now ("pm", "reviewer", "peer"). State is fully reconstructible
+from the telemetry event log, so reconnects are safe.
 
-Design decisions baked in:
-- **Channel-based routing** (no LLM router). The WS client tags every message
-  with its channel; the orchestrator looks up the persona and replies.
-- **Orchestrator-triggered twist** (not agent-decided). When the PM-channel
-  turn count reaches `scenario.twist.trigger_after_turn`, the orchestrator
-  injects the scripted twist message as a SEPARATE PM ping. Reliable demo.
-- **Mandatory telemetry**. Every candidate message, every agent reply, and
-  the twist firing land in the event log — this is what the Phase 5
-  evaluators read.
+Format A only — Format B sessions never open this orchestrator (no cast).
 """
 from __future__ import annotations
 
@@ -25,29 +17,19 @@ from app.agents.scenario_engine import Scenario
 from app.models import Actor, Event, Session as SessionModel
 from app.telemetry import get_events, log_event
 
-Channel = Literal["pm", "reviewer", "teammate"]
-CHANNELS: tuple[Channel, ...] = ("pm", "reviewer", "teammate")
+Channel = Literal["pm", "reviewer", "peer"]
+CHANNELS: tuple[Channel, ...] = ("pm", "reviewer", "peer")
 
-# Hint: a callable that takes the same kwargs as cast_reply.
 CastReplyFn = Callable[..., Awaitable[str]]
 
 _CHANNEL_TO_ACTOR: dict[Channel, Actor] = {
     "pm": Actor.PM,
     "reviewer": Actor.REVIEWER,
-    "teammate": Actor.TEAMMATE,
+    "peer": Actor.PEER,
 }
 
 
 class TurnOutcome:
-    """Result of one candidate→cast exchange.
-
-    Attributes:
-        reply: the agent's normal reply.
-        reply_ts_ms: telemetry timestamp of the reply (for evidence linking).
-        actor_name: the persona's display name (e.g. "Anya Sharma").
-        twist: the twist payload if this turn triggered it, else None.
-    """
-
     def __init__(
         self,
         *,
@@ -63,8 +45,6 @@ class TurnOutcome:
 
 
 class SessionOrchestrator:
-    """In-memory state for one session. Rebuildable from the event log."""
-
     def __init__(
         self,
         *,
@@ -82,8 +62,6 @@ class SessionOrchestrator:
         self.twist_fired = twist_fired
         self._cast_reply = cast_reply_fn or default_cast_reply
 
-    # ------------------------------------------------------------------ build
-
     @classmethod
     def from_event_log(
         cls,
@@ -93,7 +71,6 @@ class SessionOrchestrator:
         scenario: Scenario,
         cast_reply_fn: CastReplyFn | None = None,
     ) -> "SessionOrchestrator":
-        """Replay events to rebuild orchestrator state. Safe to call on every connect."""
         transcripts: dict[Channel, list[dict]] = {ch: [] for ch in CHANNELS}
         pm_turn_count = 0
         twist_fired = False
@@ -121,8 +98,6 @@ class SessionOrchestrator:
             cast_reply_fn=cast_reply_fn,
         )
 
-    # ------------------------------------------------------------------ act
-
     async def handle_candidate_message(
         self,
         db: DbSession,
@@ -130,11 +105,9 @@ class SessionOrchestrator:
         channel: Channel,
         content: str,
     ) -> TurnOutcome:
-        """Handle one candidate message: log, generate reply, maybe fire twist."""
         if channel not in CHANNELS:
             raise ValueError(f"Unknown channel: {channel}")
 
-        # 1. Log + append candidate message
         log_event(
             db,
             session=session,
@@ -146,14 +119,12 @@ class SessionOrchestrator:
         if channel == "pm":
             self.pm_turn_count += 1
 
-        # 2. Decide whether THIS turn should also fire the twist (after the reply).
         should_fire_twist = (
             not self.twist_fired
             and channel == "pm"
             and self.pm_turn_count >= self.scenario.twist.trigger_after_turn
         )
 
-        # 3. Generate the in-character reply (twist context applied AFTER firing).
         reply = await self._cast_reply(
             scenario=self.scenario,
             channel=channel,
@@ -207,11 +178,7 @@ class SessionOrchestrator:
 
 
 def history_for_channel(events: list[Event], channel: Channel) -> list[dict]:
-    """Helper for the WS handshake: reconstruct visible chat history for a channel.
-
-    Returns a list of message dicts: {actor, actor_name, content, ts_ms, kind}
-    where kind ∈ {"candidate", "agent", "requirement_change"}.
-    """
+    """Helper for the WS handshake: reconstruct visible chat history for a channel."""
     history: list[dict] = []
     for ev in events:
         if not ev.payload:

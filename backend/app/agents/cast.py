@@ -1,8 +1,10 @@
-"""Cast agents — PM, Reviewer, Teammate.
+"""Cast agents — PM, Reviewer, Peer.
 
 Each is a persona + hidden agenda + running transcript → fast-tier reply.
 Channel-based routing happens in the orchestrator; this module just renders
 one in-character reply given the scenario, channel, and conversation so far.
+
+v3 rename: "teammate" → "peer" per §7 spec.
 """
 from __future__ import annotations
 
@@ -17,7 +19,7 @@ from app.agents.prompts import (
 from app.agents.scenario_engine import Scenario
 from app.llm import Message, complete
 
-Channel = Literal["pm", "reviewer", "teammate"]
+Channel = Literal["pm", "reviewer", "peer"]
 
 
 def _build_system(scenario: Scenario, channel: Channel, twist_fired: bool) -> str:
@@ -54,15 +56,7 @@ async def cast_reply(
     transcript: list[Message],
     twist_fired: bool = False,
 ) -> str:
-    """Generate one in-character reply for `channel` given the running transcript.
-
-    Args:
-        scenario: the active session scenario.
-        channel: which cast persona is replying.
-        transcript: prior messages in this channel as [{"role": "user"|"assistant", "content": str}]
-            where "user" is the candidate and "assistant" is this cast agent.
-        twist_fired: whether the orchestrator has already injected the twist.
-    """
+    """Generate one in-character reply for `channel` given the running transcript."""
     system = _build_system(scenario, channel, twist_fired)
     messages: list[Message] = [{"role": "system", "content": system}]
     messages.extend(transcript)
@@ -72,6 +66,4 @@ async def cast_reply(
         temperature=0.85,
         max_output_tokens=400,
     )
-    # Defensive trim — the prompt asks for 1-4 sentences; if the model rambles,
-    # let it through anyway (frontend can scroll) but strip surrounding fluff.
     return reply.strip()
