@@ -16,23 +16,21 @@ export default function Disclosure() {
   const { sessionId = "" } = useParams();
   const navigate = useNavigate();
   const loadSession = useStore((s) => s.loadSession);
-  const session = useStore((s) => ({
-    format: s.format,
-    isPractice: s.isPractice,
-    minutes: s.sessionMinutes,
-    sessionId: s.sessionId,
-    role: s.scenario?.role ?? null,
-  }));
+  const format = useStore((s) => s.format);
+  const isPractice = useStore((s) => s.isPractice);
+  const minutes = useStore((s) => s.sessionMinutes);
+  const storeSessionId = useStore((s) => s.sessionId);
+  const role = useStore((s) => s.scenario?.role ?? null);
   const [ack, setAck] = useState(false);
   const [showAlt, setShowAlt] = useState(false);
 
   useEffect(() => {
-    if (sessionId && !session.sessionId) {
+    if (sessionId && storeSessionId !== sessionId) {
       loadSession(sessionId).catch(() => undefined);
     }
-  }, [sessionId, session.sessionId, loadSession]);
+  }, [sessionId, storeSessionId, loadSession]);
 
-  const isA = session.format === "A";
+  const isA = format === "A";
 
   return (
     <main id="main" className="max-w-3xl mx-auto px-4 py-10 space-y-8">
@@ -44,9 +42,9 @@ export default function Disclosure() {
           What this assessment is — and what it isn't
         </h1>
         <div className="flex flex-wrap items-center gap-2 pt-2">
-          <FormatBadge format={session.format} size="md" practice={session.isPractice} />
+          <FormatBadge format={format} size="md" practice={isPractice} />
           <span className="text-xs text-muted">
-            {session.role ?? "—"} · {session.minutes} minutes
+            {role ?? "—"} · {minutes} minutes
           </span>
         </div>
       </header>
